@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Siedloader</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#677084; --line:#dde1e8; --accent:#2563eb; --ok:#15803d; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151b; --card:#1b1f27; --text:#e6e9ef; --muted:#9aa3b5; --line:#2c323d; --accent:#60a5fa; --ok:#4ade80; --err:#f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 16px; }
+  form, .job { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  form { display:grid; gap:10px; margin-bottom:24px; }
+  input, select, button { font:inherit; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .row > * { flex:1 1 140px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border:none; }
+  button.secondary { background:transparent; color:var(--text); border:1px solid var(--line); }
+  .jobs { display:grid; gap:12px; }
+  .job h2 { font-size:16px; margin:0 0 4px; overflow-wrap:anywhere; }
+  .meta { color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:10px 0 6px; }
+  .bar > div { height:100%; background:var(--accent); transition:width .4s; }
+  .status-done { color:var(--ok); } .status-error, .status-cancelled { color:var(--err); }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .actions button, .actions a { font-size:13px; padding:6px 10px; }
+  a.btn { text-decoration:none; color:#fff; background:var(--accent); border-radius:8px; }
+  details { margin-top:8px; font-size:13px; }
+  details ul { padding-left:18px; margin:6px 0; max-height:240px; overflow:auto; }
+  #error { color:var(--err); min-height:1.5em; margin:0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Siedloader</h1>
+  <form id="form">
+    <input id="url" type="url" placeholder="Link zu einem Video oder einer Playlist" required>
+    <div class="row">
+      <select id="mode">
+        <option value="video">Video</option>
+        <option value="audio">Nur Audio (MP3)</option>
+      </select>
+      <select id="quality">
+        <option value="best">Beste Qualität</option>
+        <option value="1080">bis 1080p</option>
+        <option value="720">bis 720p</option>
+        <option value="480">bis 480p</option>
+      </select>
+      <button type="submit">Herunterladen</button>
+    </div>
+    <p id="error"></p>
+  </form>
+  <div class="jobs" id="jobs"></div>
+</main>
+<script>
+const STATUS = { queued:"In Warteschlange", running:"Läuft", done:"Fertig", error:"Fehler", cancelled:"Abgebrochen" };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+const size = (b) => b > 1e9 ? (b/1e9).toFixed(2)+" GB" : (b/1e6).toFixed(1)+" MB";
+const openDetails = new Set();
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("error").textContent = "";
+  try {
+    await api("/api/jobs", { method:"POST", body: JSON.stringify({ url: $("url").value, mode: $("mode").value, quality: $("quality").value }) });
+    $("url").value = "";
+    refresh();
+  } catch (err) { $("error").textContent = err.message; }
+});
+$("mode").addEventListener("change", () => { $("quality").disabled = $("mode").value === "audio"; });
+
+async function action(id, what) {
+  try {
+    if (what === "cancel") await api(`/api/jobs/${id}/cancel`, { method:"POST" });
+    if (what === "resume") await api(`/api/jobs/${id}/resume`, { method:"POST" });
+    if (what === "delete" && confirm("Job und heruntergeladene Dateien löschen?"))
+      await api(`/api/jobs/${id}?delete_files=true`, { method:"DELETE" });
+  } catch (err) { alert(err.message); }
+  refresh();
+}
+
+function render(job) {
+  const total = job.total || 0;
+  const pct = total ? Math.min(100, (job.completed / total) * 100) : (job.status === "done" ? 100 : (job.current_percent || 0));
+  const count = total ? `${job.completed} von ${total}` : `${job.completed} fertig`;
+  const current = job.current_title ? `Aktuell: ${esc(job.current_title)}${job.current_percent != null ? ` (${job.current_percent}%)` : ""}` : "";
+  const active = job.status === "queued" || job.status === "running";
+  const files = (job.files || []).map((f) =>
+    `<li><a href="/api/jobs/${job.id}/files/${encodeURIComponent(f.name)}">${esc(f.name)}</a> · ${size(f.size)}</li>`).join("");
+  const errors = (job.errors || []).map((m) => `<li>${esc(m)}</li>`).join("");
+  return `<div class="job">
+    <h2>${esc(job.title || job.url)}</h2>
+    <div class="meta">${esc(job.url)}</div>
+    <div class="bar"><div style="width:${pct}%"></div></div>
+    <div class="meta"><span class="status-${job.status}">${STATUS[job.status]}</span> · ${count}${job.failed ? ` · ${job.failed} fehlgeschlagen` : ""}</div>
+    ${current ? `<div class="meta">${current}</div>` : ""}
+    ${job.message ? `<div class="meta">${esc(job.message)}</div>` : ""}
+    ${files ? `<details data-id="${job.id}-files"${openDetails.has(job.id + "-files") ? " open" : ""}><summary>Dateien (${job.files.length})</summary><ul>${files}</ul></details>` : ""}
+    ${errors ? `<details data-id="${job.id}-err"${openDetails.has(job.id + "-err") ? " open" : ""}><summary>Fehlermeldungen</summary><ul>${errors}</ul></details>` : ""}
+    <div class="actions">
+      ${files ? `<a class="btn" href="/api/jobs/${job.id}/zip">Alle als ZIP</a>` : ""}
+      ${active ? `<button class="secondary" onclick="action('${job.id}','cancel')">Abbrechen</button>` : `<button class="secondary" onclick="action('${job.id}','resume')">Fortsetzen / Erneut versuchen</button>`}
+      ${active ? "" : `<button class="secondary" onclick="action('${job.id}','delete')">Löschen</button>`}
+    </div>
+  </div>`;
+}
+
+async function refresh() {
+  try {
+    const list = await api("/api/jobs");
+    const detailed = await Promise.all(list.map((j) => api(`/api/jobs/${j.id}`)));
+    document.querySelectorAll("details[open]").forEach((d) => openDetails.add(d.dataset.id));
+    document.querySelectorAll("details:not([open])").forEach((d) => openDetails.delete(d.dataset.id));
+    $("jobs").innerHTML = detailed.map(render).join("");
+  } catch (err) { $("error").textContent = err.message; }
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

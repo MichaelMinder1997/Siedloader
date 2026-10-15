@@ -1,0 +1,17 @@
+services:
+  siedloader:
+    build: .
+    container_name: siedloader
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Linke Seite: Ordner auf dem NAS, in dem die Downloads landen
+      - ./downloads:/downloads
+    environment:
+      # Ohne Passwort ist die Seite fuer jeden offen, der sie erreicht.
+      APP_USER: admin
+      APP_PASSWORD: bitte-aendern
+      MAX_PARALLEL_JOBS: "2"
+      MIN_FREE_GB: "2"
+      AUTO_UPDATE: "1"

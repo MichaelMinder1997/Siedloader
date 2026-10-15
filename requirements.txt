@@ -1,0 +1,5 @@
+fastapi==0.143.1
+uvicorn[standard]==0.54.0
+zipstream-ng==1.9.3
+# yt-dlp wird beim Start des Containers automatisch aktualisiert (siehe entrypoint.sh)
+yt-dlp[default]
