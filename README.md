@@ -46,7 +46,8 @@ Die Downloads landen im Ordner `downloads/` neben der `docker-compose.yml`. Jede
 | --- | --- | --- |
 | `POST` | `/api/jobs` | Neuer Job: `{"url": "...", "mode": "video"\|"audio", "quality": "best"\|"1080"\|"720"\|"480"}` |
 | `GET` | `/api/jobs` | Alle Jobs |
-| `GET` | `/api/jobs/{id}` | Ein Job mit Dateiliste |
+| `GET` | `/api/jobs/{id}` | Status eines Jobs |
+| `GET` | `/api/jobs/{id}/files?offset=0&limit=200` | Fertige Dateien, seitenweise |
 | `POST` | `/api/jobs/{id}/cancel` | Abbrechen |
 | `POST` | `/api/jobs/{id}/resume` | Fortsetzen oder erneut versuchen |
 | `DELETE` | `/api/jobs/{id}?delete_files=true` | Job löschen, optional mit Dateien |
@@ -62,3 +63,13 @@ DOWNLOAD_DIR=../downloads uvicorn main:app --port 8080
 ```
 
 `ffmpeg` muss installiert sein.
+
+## Tests
+
+```sh
+pip install -r requirements-dev.txt
+ruff format --check . && ruff check .
+pytest
+```
+
+Die Tests starten einen lokalen Webserver mit einer RSS-Playlist und laden diese wirklich herunter, inklusive Abbruch, Fortsetzen und Neustart. Dafür muss `ffmpeg` installiert sein.

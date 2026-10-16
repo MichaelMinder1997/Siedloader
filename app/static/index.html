@@ -27,7 +27,8 @@
   .bar > div { height:100%; background:var(--accent); transition:width .4s; }
   .status-done { color:var(--ok); } .status-error, .status-cancelled { color:var(--err); }
   .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-  .actions button, .actions a { font-size:13px; padding:6px 10px; }
+  .actions button, .actions a, .more { font-size:13px; padding:6px 10px; }
+  .more { margin-top:4px; }
   a.btn { text-decoration:none; color:#fff; background:var(--accent); border-radius:8px; }
   details { margin-top:8px; font-size:13px; }
   details ul { padding-left:18px; margin:6px 0; max-height:240px; overflow:auto; }
@@ -60,8 +61,7 @@
 const STATUS = { queued:"In Warteschlange", running:"Läuft", done:"Fertig", error:"Fehler", cancelled:"Abgebrochen" };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
-const size = (b) => b > 1e9 ? (b/1e9).toFixed(2)+" GB" : (b/1e6).toFixed(1)+" MB";
-const openDetails = new Set();
+const size = (b) => b >= 1e9 ? (b/1e9).toFixed(2)+" GB" : b >= 1e6 ? (b/1e6).toFixed(1)+" MB" : Math.max(1, Math.round(b/1e3))+" KB";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -91,39 +91,77 @@ async function action(id, what) {
   refresh();
 }
 
-function render(job) {
+// Jede Job-Karte bleibt bestehen; bei jeder Aktualisierung wird nur der Statusteil neu
+// gezeichnet. So bleibt eine geöffnete, seitenweise geladene Dateiliste erhalten.
+const cards = new Map();
+const PAGE = 200;
+
+function card(job) {
+  let el = cards.get(job.id);
+  if (el) return el;
+  el = document.createElement("div");
+  el.className = "job";
+  el.innerHTML = `<div class="summary"></div>
+    <details class="files"><summary>Dateien</summary><ul></ul><button type="button" class="secondary more" hidden>Weitere laden</button></details>
+    <div class="actions"></div>`;
+  const details = el.querySelector(".files");
+  details.addEventListener("toggle", () => { if (details.open && !details.dataset.loaded) loadFiles(job.id, true); });
+  el.querySelector(".more").addEventListener("click", () => loadFiles(job.id, false));
+  cards.set(job.id, el);
+  return el;
+}
+
+async function loadFiles(id, reset) {
+  const el = cards.get(id);
+  const ul = el.querySelector(".files ul");
+  const more = el.querySelector(".more");
+  if (reset) ul.innerHTML = "";
+  try {
+    const data = await api(`/api/jobs/${id}/files?offset=${ul.children.length}&limit=${PAGE}`);
+    ul.insertAdjacentHTML("beforeend", data.files.map((f) =>
+      `<li><a href="/api/jobs/${id}/files/${encodeURIComponent(f.name)}">${esc(f.name)}</a> · ${size(f.size)}</li>`).join(""));
+    el.querySelector(".files").dataset.loaded = "1";
+    el.querySelector(".files summary").textContent = `Dateien (${data.total})`;
+    more.hidden = ul.children.length >= data.total;
+  } catch (err) { alert(err.message); }
+}
+
+function update(job) {
+  const el = card(job);
   const total = job.total || 0;
   const pct = total ? Math.min(100, (job.completed / total) * 100) : (job.status === "done" ? 100 : (job.current_percent || 0));
   const count = total ? `${job.completed} von ${total}` : `${job.completed} fertig`;
   const current = job.current_title ? `Aktuell: ${esc(job.current_title)}${job.current_percent != null ? ` (${job.current_percent}%)` : ""}` : "";
   const active = job.status === "queued" || job.status === "running";
-  const files = (job.files || []).map((f) =>
-    `<li><a href="/api/jobs/${job.id}/files/${encodeURIComponent(f.name)}">${esc(f.name)}</a> · ${size(f.size)}</li>`).join("");
   const errors = (job.errors || []).map((m) => `<li>${esc(m)}</li>`).join("");
-  return `<div class="job">
+  const errOpen = el.querySelector(".errors")?.open ? " open" : "";
+  el.querySelector(".summary").innerHTML = `
     <h2>${esc(job.title || job.url)}</h2>
     <div class="meta">${esc(job.url)}</div>
     <div class="bar"><div style="width:${pct}%"></div></div>
     <div class="meta"><span class="status-${job.status}">${STATUS[job.status]}</span> · ${count}${job.failed ? ` · ${job.failed} fehlgeschlagen` : ""}</div>
     ${current ? `<div class="meta">${current}</div>` : ""}
     ${job.message ? `<div class="meta">${esc(job.message)}</div>` : ""}
-    ${files ? `<details data-id="${job.id}-files"${openDetails.has(job.id + "-files") ? " open" : ""}><summary>Dateien (${job.files.length})</summary><ul>${files}</ul></details>` : ""}
-    ${errors ? `<details data-id="${job.id}-err"${openDetails.has(job.id + "-err") ? " open" : ""}><summary>Fehlermeldungen</summary><ul>${errors}</ul></details>` : ""}
-    <div class="actions">
-      ${files ? `<a class="btn" href="/api/jobs/${job.id}/zip">Alle als ZIP</a>` : ""}
-      ${active ? `<button class="secondary" onclick="action('${job.id}','cancel')">Abbrechen</button>` : `<button class="secondary" onclick="action('${job.id}','resume')">Fortsetzen / Erneut versuchen</button>`}
-      ${active ? "" : `<button class="secondary" onclick="action('${job.id}','delete')">Löschen</button>`}
-    </div>
-  </div>`;
+    ${errors ? `<details class="errors"${errOpen}><summary>Letzte Fehlermeldungen</summary><ul>${errors}</ul></details>` : ""}`;
+  const files = el.querySelector(".files");
+  files.hidden = job.completed === 0;
+  if (!files.dataset.loaded) files.querySelector("summary").textContent = `Dateien (${job.completed})`;
+  el.querySelector(".actions").innerHTML = `
+    ${job.completed ? `<a class="btn" href="/api/jobs/${job.id}/zip">Alle als ZIP</a>` : ""}
+    ${active ? `<button class="secondary" onclick="action('${job.id}','cancel')">Abbrechen</button>` : `<button class="secondary" onclick="action('${job.id}','resume')">Fortsetzen / Erneut versuchen</button>`}
+    ${active ? "" : `<button class="secondary" onclick="action('${job.id}','delete')">Löschen</button>`}`;
+  return el;
 }
 
 async function refresh() {
   try {
     const list = await api("/api/jobs");
-    const detailed = await Promise.all(list.map((j) => api(`/api/jobs/${j.id}`)));
-    document.querySelectorAll("details[open]").forEach((d) => openDetails.add(d.dataset.id));
-    document.querySelectorAll("details:not([open])").forEach((d) => openDetails.delete(d.dataset.id));
-    $("jobs").innerHTML = detailed.map(render).join("");
+    const ids = new Set(list.map((j) => j.id));
+    for (const [id, el] of cards) if (!ids.has(id)) { el.remove(); cards.delete(id); }
+    list.forEach((job, i) => {
+      const el = update(job);
+      if ($("jobs").children[i] !== el) $("jobs").insertBefore(el, $("jobs").children[i] || null);
+    });
   } catch (err) { $("error").textContent = err.message; }
 }
 refresh();

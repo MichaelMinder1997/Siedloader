@@ -16,6 +16,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -23,9 +24,10 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -55,7 +57,14 @@ QUALITY_FORMATS = {
     "480": "bestvideo*[height<=480]+bestaudio/best[height<=480]/best",
 }
 
-app = FastAPI(title="Siedloader")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    load_state()
+    yield
+
+
+app = FastAPI(title="Siedloader", lifespan=lifespan)
 executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_JOBS)
 jobs: dict[str, Job] = {}
 jobs_lock = threading.Lock()
@@ -322,14 +331,17 @@ def get_job(job_id: str) -> Job:
 def list_files(job: Job) -> list[Path]:
     if not job.dir.is_dir():
         return []
-    return sorted(
+    files = (
         p
         for p in job.dir.iterdir()
         if p.is_file() and not p.name.startswith(".") and not p.name.endswith(HIDDEN_SUFFIXES)
     )
+    # Natuerliche Sortierung, damit "2 - ..." vor "10 - ..." kommt (Reihenfolge der Playlist).
+    return sorted(
+        files, key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)]
+    )
 
 
-@app.on_event("startup")
 def load_state() -> None:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
@@ -364,10 +376,15 @@ def all_jobs() -> list[dict]:
 
 @app.get("/api/jobs/{job_id}")
 def job_detail(job_id: str) -> dict:
-    job = get_job(job_id)
-    data = job.to_dict()
-    data["files"] = [{"name": p.name, "size": p.stat().st_size} for p in list_files(job)]
-    return data
+    return get_job(job_id).to_dict()
+
+
+@app.get("/api/jobs/{job_id}/files")
+def job_files(job_id: str, offset: int = 0, limit: int = 200) -> dict:
+    # Seitenweise, damit auch Playlists mit zehntausenden Dateien die Oberflaeche nicht ausbremsen.
+    files = list_files(get_job(job_id))
+    page = files[max(offset, 0) : max(offset, 0) + min(max(limit, 1), 1000)]
+    return {"total": len(files), "files": [{"name": p.name, "size": p.stat().st_size} for p in page]}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -408,7 +425,12 @@ def delete_job(job_id: str, delete_files: bool = False) -> dict:
 def download_file(job_id: str, name: str) -> FileResponse:
     job = get_job(job_id)
     path = (job.dir / name).resolve()
-    if path.parent != job.dir.resolve() or path not in list_files(job):
+    if (
+        path.parent != job.dir.resolve()
+        or not path.is_file()
+        or path.name.startswith(".")
+        or path.name.endswith(HIDDEN_SUFFIXES)
+    ):
         raise HTTPException(404, "Datei nicht gefunden")
     return FileResponse(path, filename=path.name)
 
@@ -425,12 +447,15 @@ def download_zip(job_id: str) -> StreamingResponse:
     for path in files:
         zs.add_path(str(path), path.name)
     name = "".join(c for c in (job.title or job.id) if c.isalnum() or c in " -_").strip() or job.id
+    ascii_name = name.encode("ascii", "ignore").decode().strip() or job.id
     return StreamingResponse(
         zs,
         media_type="application/zip",
         headers={
             "Content-Length": str(len(zs)),
-            "Content-Disposition": f'attachment; filename="{name}.zip"',
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_name}.zip\"; filename*=UTF-8''{quote(name + '.zip')}"
+            ),
         },
     )
 
